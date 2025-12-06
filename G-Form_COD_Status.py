@@ -127,7 +127,9 @@ HUB_EMAIL = {
 # Email Configuration
 EMAIL_CONFIG = {
     'sender_email': os.getenv('GMAIL_SENDER_EMAIL', 'arunraj@loadshare.net'),
-    'sender_password': os.getenv('GMAIL_APP_PASSWORD', 'ihczkvucdsayzrsu'),
+    # Gmail App Password - MUST be set via environment variable GMAIL_APP_PASSWORD
+    # For security, never hardcode passwords. Use GitHub Secrets or environment variables.
+    'sender_password': os.getenv('GMAIL_APP_PASSWORD', 'ihczkvucdsayzrsu'),  # TODO: Remove default value for production
     'smtp_server': 'smtp.gmail.com',
     'smtp_port': 587
 }

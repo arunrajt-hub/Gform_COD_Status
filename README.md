@@ -46,7 +46,7 @@ pip install -r requirements.txt
 
 The script automatically sends emails to:
 - **TO**: All hub emails, CLM emails, Lokesh, Bharath, and Maligai Rasmeen
-- **CC**: Rakib
+- **CC**: Empty
 
 Recipients are configured in the script's `HUB_EMAIL`, `CLM_EMAIL`, and `get_email_recipients()` function.
 

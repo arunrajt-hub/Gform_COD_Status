@@ -158,8 +158,8 @@ def get_email_recipients():
     # Combine all TO recipients (hubs + CLMs + Lokesh + Bharath + Maligai Rasmeen)
     to_recipients = list(set(hub_emails + list(clm_emails) + additional_to))
     
-    # CC list: Rakib
-    cc_recipients = ["rakib@loadshare.net"]
+    # CC list: Empty
+    cc_recipients = []
     
     return to_recipients, cc_recipients
 

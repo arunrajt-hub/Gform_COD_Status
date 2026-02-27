@@ -1,7 +1,9 @@
 """
 G-Form COD Status Email Automation Script
-Reads Google Sheets data, filters by hub names, and sends styled HTML email with latest 4 days status.
+Reads Google Sheets data, filters by hub names, sends styled HTML email with latest 4 days status,
+and sends the same report as an image to WhatsApp via WHAPI.
 """
+__version__ = "2.0"  # v2.0: Added WhatsApp integration
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -13,6 +15,13 @@ from email.mime.text import MIMEText
 import logging
 import os
 import re
+import sys
+import tempfile
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 # Configure logging
 logging.basicConfig(
@@ -95,6 +104,7 @@ CLM_EMAIL = {
     "Haseem": "hasheem@loadshare.net",
     "Madvesh": "madvesh@loadshare.net",
     "Irappa": "irappa.vaggappanavar@loadshare.net",
+    "Singaram": "singaram@loadshare.net",
     "Lokesh": "lokeshh@loadshare.net",
     "Bharath": "bharath.s@loadshare.net"
 }
@@ -124,15 +134,31 @@ HUB_EMAIL = {
     "LargelogicChinnamanurODH_CNM": "chinnamannur_cnm@loadshare.net",
 }
 
-# Email Configuration
+# Email Configuration - Use environment variables (never hardcode passwords)
+# For GitHub Actions: Add GMAIL_SENDER_EMAIL and GMAIL_APP_PASSWORD as repository secrets
+# For local: set env vars or use a .env file
 EMAIL_CONFIG = {
-    'sender_email': os.getenv('GMAIL_SENDER_EMAIL', 'arunraj@loadshare.net'),
-    # Gmail App Password - MUST be set via environment variable GMAIL_APP_PASSWORD
-    # For security, never hardcode passwords. Use GitHub Secrets or environment variables.
-    'sender_password': os.getenv('GMAIL_APP_PASSWORD', 'ihczkvucdsayzrsu'),  # TODO: Remove default value for production
+    'sender_email': os.getenv('GMAIL_SENDER_EMAIL', ''),
+    'sender_password': os.getenv('GMAIL_APP_PASSWORD', ''),
     'smtp_server': 'smtp.gmail.com',
     'smtp_port': 587
 }
+
+# Test mode: if set, send ONLY to this email (skip all other recipients)
+# Usage: TEST_EMAIL=your@email.com python G-Form_COD_Status.py
+TEST_EMAIL = os.getenv('TEST_EMAIL', '').strip()
+
+# WhatsApp (WHAPI) Configuration - same as reservations_email_automation.py
+# Dashboard: https://whapi.cloud/
+WHATSAPP_CONFIG = {
+    'enabled': os.getenv('WHATSAPP_ENABLED', '1') == '1',
+    'token': os.getenv('WHAPI_TOKEN', 'AajpPuQixaM8bnjBLetBt2n23Z5XOCji'),
+    'recipient_phone': os.getenv('WHATSAPP_PHONE', '120363320457092145@g.us'),  # Group ID
+    'api_url': 'https://gate.whapi.cloud/messages/image',
+}
+
+# Optional: HTML-to-Image cloud service (e.g. Render). If set, used instead of local Chrome.
+HTML_TO_IMAGE_SERVICE_URL = os.getenv('HTML_TO_IMAGE_SERVICE_URL', '')
 
 def get_email_recipients():
     """Build email recipient lists dynamically"""
@@ -148,14 +174,16 @@ def get_email_recipients():
             if clm_name in CLM_EMAIL:
                 clm_emails.add(CLM_EMAIL[clm_name])
     
-    # Add Lokesh, Bharath, and Maligai Rasmeen to TO list
+    # Add Lokesh, Bharath, Maligai Rasmeen, Singaram, and Saicharan to TO list
     additional_to = [
         CLM_EMAIL.get("Lokesh", "lokeshh@loadshare.net"),
         CLM_EMAIL.get("Bharath", "bharath.s@loadshare.net"),
-        "maligai.rasmeen@loadshare.net"
+        "maligai.rasmeen@loadshare.net",
+        "singaram@loadshare.net",
+        "saicharan@loadshare.net"
     ]
     
-    # Combine all TO recipients (hubs + CLMs + Lokesh + Bharath + Maligai Rasmeen)
+    # Combine all TO recipients (hubs + CLMs + additional_to)
     to_recipients = list(set(hub_emails + list(clm_emails) + additional_to))
     
     # CC list: Empty
@@ -283,21 +311,18 @@ def parse_date(date_str):
     
     for fmt in date_formats:
         try:
-            parsed_date = datetime.strptime(date_str, fmt)
-            result_date = parsed_date.date()
-            
-            if fmt == '%d-%b' or fmt == '%d-%B':
+            # For formats without year (%d-%b, %d-%B), append current year to avoid DeprecationWarning
+            if fmt in ('%d-%b', '%d-%B'):
                 current_year = datetime.now().year
-                if result_date.year == 1900:
-                    try:
-                        result_date = datetime(current_year, result_date.month, result_date.day).date()
-                    except ValueError:
-                        try:
-                            result_date = datetime(current_year + 1, result_date.month, result_date.day).date()
-                        except ValueError:
-                            result_date = datetime(current_year, result_date.month, min(result_date.day, 28)).date()
+                parse_str = f"{date_str}-{current_year}"
+                parse_fmt = '%d-%b-%Y' if fmt == '%d-%b' else '%d-%B-%Y'
+                parsed_date = datetime.strptime(parse_str, parse_fmt)
+                result_date = parsed_date.date()
+            else:
+                parsed_date = datetime.strptime(date_str, fmt)
+                result_date = parsed_date.date()
             
-            # Handle year 25 as 2025
+            # Handle 2-digit year 25 as 2025
             if result_date.year == 1925 or (result_date.year < 100 and result_date.year == 25):
                 result_date = datetime(2025, result_date.month, result_date.day).date()
             
@@ -541,10 +566,10 @@ def process_cod_status_data(data):
 # HTML EMAIL FUNCTIONS
 # ============================================================================
 
-def create_styled_html_table(headers, data):
-    """Create styled HTML table"""
+def create_styled_html_table(headers, data, whatsapp_mode=False):
+    """Create styled HTML table. whatsapp_mode=True for larger fonts and compact width (WhatsApp image)."""
     try:
-        logger.info("🎨 Creating HTML table...")
+        logger.info("🎨 Creating HTML table..." + (" (WhatsApp mode)" if whatsapp_mode else ""))
         
         # Get date range from headers (skip Hub Name)
         date_headers = [h for h in headers if h not in ["Hub Name", "TOTAL"]]
@@ -552,6 +577,26 @@ def create_styled_html_table(headers, data):
             date_range_text = f"Latest {len(date_headers)} Days: {', '.join(date_headers)}"
         else:
             date_range_text = "Latest 4 Days Status"
+        
+        # WhatsApp: larger fonts, compact width for image conversion
+        whatsapp_css = ""
+        if whatsapp_mode and data:
+            max_hub_len = max((len(str(row[0] or "")) for row in data), default=15)
+            hub_col_width_px = max(280, int(max_hub_len * 12) + 60)
+            num_date_cols = len([h for h in headers if h not in ["Hub Name", "TOTAL"]])
+            total_table_width = hub_col_width_px + num_date_cols * 55
+            whatsapp_css = f"""
+        body {{ padding: 4px; background: #ffffff !important; min-height: auto !important; }}
+        .container {{ max-width: {total_table_width}px; overflow: visible !important; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }}
+        .content {{ padding: 6px 8px; overflow: visible !important; overflow-x: visible !important; }}
+        .header {{ padding: 8px 10px; }}
+        .header h1 {{ font-size: 16px; }}
+        .header p {{ font-size: 12px; margin: 2px 0 0 0; }}
+        table {{ font-size: 12px; table-layout: fixed; width: 100%; }}
+        th, td {{ padding: 6px 7px; font-size: 11px; overflow: visible !important; white-space: nowrap; }}
+        th:first-child, td:first-child {{ width: {hub_col_width_px}px; min-width: {hub_col_width_px}px; font-size: 10px; }}
+        th:not(:first-child), td:not(:first-child) {{ width: 55px; min-width: 50px; font-size: 11px; }}
+        """
         
         html = f"""<!DOCTYPE html>
 <html>
@@ -575,6 +620,7 @@ def create_styled_html_table(headers, data):
             box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             overflow: hidden;
         }}
+        {whatsapp_css}
         .header {{
             background: linear-gradient(135deg, #FF6B35 0%, #F7931E 50%, #FFD23F 100%);
             color: white;
@@ -791,7 +837,14 @@ def create_styled_html_table(headers, data):
                 html += f'                    <td style="{cell_style}">{display_value}</td>\n'
             html += '                </tr>\n'
         
-        html += """            </table>
+        if whatsapp_mode:
+            html += """            </table>
+        </div>
+    </div>
+</body>
+</html>"""
+        else:
+            html += """            </table>
         </div>
         <div class="footer">
             <p>This report is automatically generated by the G-Form COD Status Automation System</p>
@@ -807,6 +860,137 @@ def create_styled_html_table(headers, data):
         raise
 
 # ============================================================================
+# WHATSAPP (WHAPI) FUNCTIONS
+# ============================================================================
+
+def html_to_image_bytes(html_content):
+    """
+    Convert HTML content to PNG image bytes (base64).
+    Uses HTML_TO_IMAGE_SERVICE_URL if set (cloud), else local html_table_to_image (Selenium/Chrome).
+    Returns: (success, base64_string or None, error_message)
+    """
+    try:
+        if HTML_TO_IMAGE_SERVICE_URL and requests:
+            logger.info("📱 Using cloud HTML-to-image service")
+            url = HTML_TO_IMAGE_SERVICE_URL.rstrip('/')
+            if not url.endswith('convert'):
+                url = f"{url}/convert"
+            try:
+                resp = requests.post(
+                    url,
+                    json={
+                        "html": html_content,
+                        "return_json": True,
+                        "raw_html": True,
+                        "crop_selector": ".container"
+                    },
+                    timeout=120
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get('success') and data.get('image_base64'):
+                    return True, data['image_base64'], None
+                return False, None, data.get('error', 'Conversion failed')
+            except Exception as e:
+                logger.warning(f"⚠️ Cloud HTML-to-image failed: {e}")
+
+        logger.info("📱 Using local Chrome/Selenium for HTML-to-image...")
+        try:
+            from html_table_to_image import html_to_image
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                output_path = tmp.name
+            try:
+                result = html_to_image(
+                    html_content=html_content,
+                    output_path=output_path,
+                    include_base64=True,
+                    raw_html=True,
+                    crop_selector=".container"
+                )
+                if result.get('success') and result.get('image_base64'):
+                    return True, result['image_base64'], None
+                err_msg = result.get('error', 'Conversion failed')
+                logger.warning(f"⚠️ html_table_to_image returned: success={result.get('success')}, error={err_msg}")
+                return False, None, err_msg
+            finally:
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+        except ImportError as e:
+            logger.warning(f"⚠️ html_table_to_image not available: {e}")
+            return False, None, f"html_table_to_image not found. Install: pip install selenium webdriver-manager pillow. Or set HTML_TO_IMAGE_SERVICE_URL for cloud."
+        except Exception as e:
+            logger.warning(f"⚠️ Local HTML-to-image failed: {e}")
+            import traceback
+            logger.info(traceback.format_exc())
+            return False, None, str(e)
+    except Exception as e:
+        logger.error(f"❌ HTML to image error: {e}")
+        return False, None, str(e)
+
+
+def send_whatsapp_image(html_content, caption=None):
+    """Convert HTML to image and send via WHAPI to configured WhatsApp group."""
+    logger.info("📱 WhatsApp: Checking configuration...")
+    if not WHATSAPP_CONFIG['enabled']:
+        logger.info("📱 WhatsApp disabled (set WHATSAPP_ENABLED=1 to enable)")
+        return
+
+    token = WHATSAPP_CONFIG['token'].strip() if WHATSAPP_CONFIG['token'] else ''
+    if not token:
+        logger.warning("⚠️ WHAPI_TOKEN not set - skipping WhatsApp send")
+        logger.warning("   Set: $env:WHAPI_TOKEN = 'your-token'  (get from https://whapi.cloud/)")
+        return
+
+    if not requests:
+        logger.error("❌ 'requests' package required for WhatsApp. Install: pip install requests")
+        return
+
+    logger.info(f"📱 WhatsApp: Token set, recipient: {WHATSAPP_CONFIG['recipient_phone']}")
+    logger.info("📱 Converting HTML to image for WhatsApp...")
+    success, img_base64, err = html_to_image_bytes(html_content)
+    if not success:
+        logger.error(f"❌ WhatsApp: HTML to image failed: {err}")
+        return
+
+    media_value = f"data:image/png;base64,{img_base64}"
+
+    if caption is None:
+        today = datetime.now().strftime('%d-%b-%Y')
+        caption = f"South - COD (Gform) - Status - {today}"
+
+    payload = {
+        "to": WHATSAPP_CONFIG['recipient_phone'],
+        "caption": caption,
+        "media": media_value
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        logger.info(f"📤 Sending image to WhatsApp ({WHATSAPP_CONFIG['recipient_phone']})...")
+        resp = requests.post(
+            WHATSAPP_CONFIG['api_url'],
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+        resp.raise_for_status()
+        logger.info("✅ WhatsApp image sent successfully!")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ WhatsApp send failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                err_body = e.response.text[:500]
+                logger.error(f"   Response: {err_body}")
+            except Exception:
+                pass
+
+# ============================================================================
 # EMAIL FUNCTIONS
 # ============================================================================
 
@@ -815,14 +999,36 @@ def send_email(html_content):
     try:
         logger.info("📧 Preparing email...")
         
-        if not EMAIL_CONFIG['sender_password']:
-            logger.error("❌ Gmail App Password not set!")
-            logger.error("   Set it via environment variable: GMAIL_APP_PASSWORD")
+        sender_email = EMAIL_CONFIG['sender_email'].strip() if EMAIL_CONFIG['sender_email'] else ''
+        sender_password = EMAIL_CONFIG['sender_password'].strip() if EMAIL_CONFIG['sender_password'] else ''
+        
+        if not sender_email or not sender_password:
+            logger.error("❌ Gmail credentials not set!")
+            logger.error("   Required environment variables:")
+            logger.error("   - GMAIL_SENDER_EMAIL   (e.g., your.email@loadshare.net)")
+            logger.error("   - GMAIL_APP_PASSWORD   (16-char App Password from Google Account)")
+            logger.error("")
+            logger.error("   For GitHub Actions: Add these as repository secrets in Settings > Secrets")
+            logger.error("   For local run: export GMAIL_SENDER_EMAIL=... GMAIL_APP_PASSWORD=...")
+            logger.error("")
+            logger.error("   How to create Gmail App Password: https://support.google.com/accounts/answer/185833")
             logger.warning("⚠️  Skipping email send. HTML content generated successfully.")
             return
         
         # Get email recipients dynamically
         to_recipients, cc_recipients = get_email_recipients()
+        
+        # Test mode: send only to TEST_EMAIL if set
+        if TEST_EMAIL:
+            logger.info(f"🧪 TEST MODE: Sending ONLY to {TEST_EMAIL}")
+            to_recipients = [TEST_EMAIL]
+            cc_recipients = []
+        
+        # Add sender to CC so they get a copy (visible to all recipients)
+        if sender_email not in cc_recipients:
+            cc_recipients.append(sender_email)
+        
+        bcc_recipients = []
         
         # Log detailed recipient information before sending
         logger.info(f"📧 Email recipients configured:")
@@ -857,22 +1063,29 @@ def send_email(html_content):
         logger.info(f"   • Lokesh: {CLM_EMAIL.get('Lokesh', 'lokeshh@loadshare.net')}")
         logger.info(f"   • Bharath: {CLM_EMAIL.get('Bharath', 'bharath.s@loadshare.net')}")
         logger.info(f"   • Maligai Rasmeen: maligai.rasmeen@loadshare.net")
+        logger.info(f"   • Singaram: singaram@loadshare.net")
+        logger.info(f"   • Saicharan: saicharan@loadshare.net")
         
         logger.info(f"\n{'='*60}")
         logger.info(f"📋 CC RECIPIENTS ({len(cc_recipients)} total):")
         logger.info(f"{'='*60}")
         for cc_email in cc_recipients:
             logger.info(f"   • {cc_email}")
+        logger.info(f"\n📩 Sender in CC: {sender_email}")
         logger.info(f"{'='*60}\n")
         
         # Create message
         msg = MIMEMultipart('alternative')
-        msg['From'] = EMAIL_CONFIG['sender_email']
+        msg['From'] = sender_email
         msg['To'] = ', '.join(to_recipients)
         
         # Add CC recipients
         if cc_recipients:
             msg['Cc'] = ', '.join(cc_recipients)
+        
+        # Add BCC if any
+        if bcc_recipients:
+            msg['Bcc'] = ', '.join(bcc_recipients)
         
         today_datetime = datetime.now()
         today_date = today_datetime.strftime('%d-%b-%Y')
@@ -885,22 +1098,24 @@ def send_email(html_content):
         server = smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port'])
         server.starttls()
         logger.info("🔐 Logging in...")
-        server.login(EMAIL_CONFIG['sender_email'], EMAIL_CONFIG['sender_password'])
+        server.login(sender_email, sender_password)
         
         logger.info("📤 Sending email...")
-        # All recipients (To + CC list)
-        all_recipients = to_recipients + cc_recipients
+        # All recipients (To + CC + BCC)
+        all_recipients = to_recipients + cc_recipients + bcc_recipients
         text = msg.as_string()
-        server.sendmail(EMAIL_CONFIG['sender_email'], all_recipients, text)
+        server.sendmail(sender_email, all_recipients, text)
         server.quit()
         
         logger.info("✅ Email sent successfully!")
+        logger.info("   💡 Sender is in CC - check Inbox or Spam if you don't see it.")
         logger.info(f"\n{'='*60}")
         logger.info(f"📧 Email Summary:")
         logger.info(f"{'='*60}")
         logger.info(f"   Subject: {msg['Subject']}")
         logger.info(f"   To: {len(to_recipients)} recipients")
         logger.info(f"   CC: {len(cc_recipients)} recipients")
+        logger.info(f"   CC includes sender")
         logger.info(f"{'='*60}")
     except Exception as e:
         logger.error(f"❌ Error sending email: {e}")
@@ -914,7 +1129,7 @@ def main():
     """Main execution function"""
     try:
         logger.info("=" * 60)
-        logger.info("🚀 Starting G-Form COD Status Email Automation")
+        logger.info("🚀 Starting G-Form COD Status Email Automation (v%s - with WhatsApp)", __version__)
         logger.info("=" * 60)
         
         # Step 1: Initialize Google Sheets client
@@ -941,10 +1156,17 @@ def main():
         # Step 4: Create HTML
         logger.info("\n🎨 Step 3: Creating HTML email...")
         html_content = create_styled_html_table(headers, filtered_data)
+        html_whatsapp = create_styled_html_table(headers, filtered_data, whatsapp_mode=True)
         
         # Step 5: Send email
         logger.info("\n📧 Step 4: Sending email...")
         send_email(html_content)
+        
+        # Step 6: Send report as image to WhatsApp (WHAPI)
+        logger.info("\n📱 Step 5: Sending WhatsApp image...")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        send_whatsapp_image(html_whatsapp)
         
         logger.info("\n" + "=" * 60)
         logger.info("✅ G-Form COD Status Email Automation completed successfully!")

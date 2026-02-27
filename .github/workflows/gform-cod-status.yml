@@ -6,57 +6,65 @@ on:
     - cron: '0 4 * * *'
     # Run daily at 8:00 PM IST (14:30 UTC)
     - cron: '30 14 * * *'
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - 'G-Form_COD_Status.py'
+      - 'html_table_to_image.py'
       - '.github/workflows/gform-cod-status.yml'
 
 jobs:
   send-cod-status-report:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install requests selenium webdriver-manager pillow
 
-    - name: Create service account key file
-      env:
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      run: |
-        echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service_account_key.json
-        chmod 600 service_account_key.json
+      - name: Setup Chrome for WhatsApp image
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-chromedriver: true
+          install-dependencies: true
 
-    - name: Run G-Form COD Status Script
-      env:
-        GMAIL_SENDER_EMAIL: ${{ secrets.GMAIL_SENDER_EMAIL }}
-        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      run: |
-        python G-Form_COD_Status.py
+      - name: Create service account key file
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service_account_key.json
+          chmod 600 service_account_key.json
 
-    - name: Upload logs (if script creates any)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: execution-logs
-        path: |
-          *.log
-          *_log.txt
-        if-no-files-found: ignore
-        retention-days: 7
+      - name: Run G-Form COD Status Script
+        env:
+          GMAIL_SENDER_EMAIL: ${{ secrets.GMAIL_SENDER_EMAIL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          WHAPI_TOKEN: ${{ secrets.WHAPI_TOKEN }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          HTML_TO_IMAGE_SERVICE_URL: ${{ secrets.HTML_TO_IMAGE_SERVICE_URL }}
+        run: python G-Form_COD_Status.py
 
+      - name: Upload logs (if script creates any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-logs
+          path: |
+            *.log
+            *_log.txt
+          if-no-files-found: ignore
+          retention-days: 7

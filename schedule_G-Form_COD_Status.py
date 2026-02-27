@@ -1,5 +1,5 @@
 """
-Scheduler script to run G-Form COD Status automation daily at 9:30 AM and 8:00 PM IST
+Scheduler script to run G-Form COD Status automation daily at 7:00 AM and 9:00 PM IST
 This script runs continuously and executes the main script at scheduled intervals
 
 Usage:
@@ -90,15 +90,15 @@ def main():
     ist_time = get_ist_time()
     logging.info(f"Current IST time: {ist_time.strftime('%Y-%m-%d %H:%M:%S IST')}")
     logging.info("Schedule:")
-    logging.info("   • Daily at 09:30 IST (9:30 AM)")
-    logging.info("   • Daily at 20:00 IST (8:00 PM)")
+    logging.info("   • Daily at 07:00 IST (7:00 AM)")
+    logging.info("   • Daily at 21:00 IST (9:00 PM)")
     logging.info("="*80)
     
-    # Schedule the job to run at 9:30 AM IST daily
-    schedule.every().day.at("09:30").do(run_cod_status)
+    # Schedule the job to run at 7:00 AM IST daily
+    schedule.every().day.at("07:00").do(run_cod_status)
     
-    # Schedule the job to run at 8:00 PM IST daily
-    schedule.every().day.at("20:00").do(run_cod_status)
+    # Schedule the job to run at 9:00 PM IST daily
+    schedule.every().day.at("21:00").do(run_cod_status)
     
     # Note: The schedule library uses local time by default
     # Since the user is in IST timezone, this should work correctly

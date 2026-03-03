@@ -150,10 +150,17 @@ TEST_EMAIL = os.getenv('TEST_EMAIL', '').strip()
 
 # WhatsApp (WHAPI) Configuration - same as reservations_email_automation.py
 # Dashboard: https://whapi.cloud/
+# WHATSAPP_PHONE: comma/newline/semicolon separated for multiple groups
+def _parse_whatsapp_recipients(s):
+    if not s:
+        return []
+    return [p.strip() for p in re.split(r'[,\n;]+', str(s)) if p.strip()]
+
+_default_recipients = '120363320457092145@g.us,120363279829077807@g.us'
 WHATSAPP_CONFIG = {
     'enabled': os.getenv('WHATSAPP_ENABLED', '1') == '1',
     'token': os.getenv('WHAPI_TOKEN', 'AajpPuQixaM8bnjBLetBt2n23Z5XOCji'),
-    'recipient_phone': os.getenv('WHATSAPP_PHONE', '120363320457092145@g.us'),  # Group ID
+    'recipient_phone': os.getenv('WHATSAPP_PHONE', _default_recipients),  # Comma-separated for multiple groups
     'api_url': 'https://gate.whapi.cloud/messages/image',
 }
 
@@ -931,23 +938,24 @@ def html_to_image_bytes(html_content):
 
 
 def send_whatsapp_image(html_content, caption=None):
-    """Convert HTML to image and send via WHAPI to configured WhatsApp group."""
+    """Convert HTML to image and send via WHAPI to configured WhatsApp group(s)."""
     logger.info("📱 WhatsApp: Checking configuration...")
     if not WHATSAPP_CONFIG['enabled']:
         logger.info("📱 WhatsApp disabled (set WHATSAPP_ENABLED=1 to enable)")
         return
 
     token = WHATSAPP_CONFIG['token'].strip() if WHATSAPP_CONFIG['token'] else ''
-    if not token:
-        logger.warning("⚠️ WHAPI_TOKEN not set - skipping WhatsApp send")
-        logger.warning("   Set: $env:WHAPI_TOKEN = 'your-token'  (get from https://whapi.cloud/)")
+    recipients = _parse_whatsapp_recipients(WHATSAPP_CONFIG['recipient_phone'])
+    if not token or not recipients:
+        logger.warning("⚠️ WHAPI_TOKEN or WHATSAPP_PHONE not set - skipping WhatsApp send")
+        logger.warning("   Set WHATSAPP_PHONE comma-separated for multiple groups (e.g. id1@g.us,id2@g.us)")
         return
 
     if not requests:
         logger.error("❌ 'requests' package required for WhatsApp. Install: pip install requests")
         return
 
-    logger.info(f"📱 WhatsApp: Token set, recipient: {WHATSAPP_CONFIG['recipient_phone']}")
+    logger.info(f"📱 WhatsApp: Token set, sending to {len(recipients)} recipient(s)")
     logger.info("📱 Converting HTML to image for WhatsApp...")
     success, img_base64, err = html_to_image_bytes(html_content)
     if not success:
@@ -960,35 +968,35 @@ def send_whatsapp_image(html_content, caption=None):
         today = datetime.now().strftime('%d-%b-%Y')
         caption = f"South - COD (Gform) - Status - {today}"
 
-    payload = {
-        "to": WHATSAPP_CONFIG['recipient_phone'],
-        "caption": caption,
-        "media": media_value
-    }
-
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    try:
-        logger.info(f"📤 Sending image to WhatsApp ({WHATSAPP_CONFIG['recipient_phone']})...")
-        resp = requests.post(
-            WHATSAPP_CONFIG['api_url'],
-            json=payload,
-            headers=headers,
-            timeout=60
-        )
-        resp.raise_for_status()
-        logger.info("✅ WhatsApp image sent successfully!")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ WhatsApp send failed: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                err_body = e.response.text[:500]
-                logger.error(f"   Response: {err_body}")
-            except Exception:
-                pass
+    for recipient in recipients:
+        try:
+            logger.info(f"📤 Sending image to WhatsApp ({recipient})...")
+            payload = {
+                "to": recipient,
+                "caption": caption,
+                "media": media_value
+            }
+            resp = requests.post(
+                WHATSAPP_CONFIG['api_url'],
+                json=payload,
+                headers=headers,
+                timeout=60
+            )
+            resp.raise_for_status()
+            logger.info(f"✅ WhatsApp image sent to {recipient}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ WhatsApp send failed for {recipient}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    err_body = e.response.text[:500]
+                    logger.error(f"   Response: {err_body}")
+                except Exception:
+                    pass
 
 # ============================================================================
 # EMAIL FUNCTIONS
